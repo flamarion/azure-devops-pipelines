@@ -1,0 +1,35 @@
+parameters:
+  - name: application
+    type: string
+  - name: description
+    type: string
+
+stages:
+  - stage: Build
+    dependsOn: Setup
+    jobs:
+      - job: BuildImage
+        variables:
+          envVar: $[ stageDependencies.Setup.Initialize.outputs['BranchName.envVar'] ]
+          ecsCluster: $[ stageDependencies.Setup.Initialize.outputs['BranchName.ecsCluster'] ]
+          version: $[ stageDependencies.Setup.Initialize.outputs['Version.newVersion'] ]
+
+        steps:
+          - task: "Docker@1"
+            displayName: "Build: ${{ parameters.description }}"
+            inputs:
+              containerregistrytype: "Container Registry"
+              imageName: "${{ parameters.application }}:$(version)"
+              qualifyImageName: false
+              command: "Build an image"
+
+          - script: |
+              docker save ${{ parameters.application }}:$(version) | gzip > $(Build.ArtifactStagingDirectory)/${{ parameters.application }}-$(version).tar.gz
+            displayName: "Save: ${{ parameters.description }}"
+
+          - task: PublishBuildArtifacts@1
+            displayName: "Publish: ${{ parameters.description }}"
+            inputs:
+              PathtoPublish: "$(Build.ArtifactStagingDirectory)"
+              ArtifactName: "${{ parameters.application }}"
+              publishLocation: "Container"

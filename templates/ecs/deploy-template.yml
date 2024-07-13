@@ -1,0 +1,31 @@
+parameters:
+  - name: description
+    type: string
+  - name: servicename
+    type: string
+
+stages:
+  - stage: Deploy
+    condition: and(succeeded(), in(variables['Build.SourceBranchName'], 'develop', 'homolog', 'master'))
+    dependsOn:
+      - Setup
+      - Build
+      - Publish_to_ECR
+    jobs:
+      - job: Deploy
+        variables:
+          envVar: $[ stageDependencies.Setup.Initialize.outputs['BranchName.envVar'] ]
+          ecsCluster: $[ stageDependencies.Setup.Initialize.outputs['BranchName.ecsCluster'] ]
+          version: $[ stageDependencies.Setup.Initialize.outputs['Version.newVersion'] ]
+
+        steps:
+          - task: "AmazonWebServices.aws-vsts-tools.AWSCLI.AWSCLI@1"
+            displayName: "Deploy: ${{ parameters.description }} $(envVar))"
+            condition: and(succeeded(), ne(variables['envVar'], 'unknown'))
+            inputs:
+              awsCredentials: "<AWS CREDENTIALS>"
+              regionName: "<AWS REGION>"
+              awsCommand: ecs
+              awsSubCommand: "update-service"
+              awsArguments: "--cluster $(ecsCluster) --service $(envVar)-${{ parameters.servicename }} --force-new-deployment"
+              failOnStandardError: false

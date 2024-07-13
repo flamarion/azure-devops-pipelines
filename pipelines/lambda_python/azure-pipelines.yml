@@ -1,0 +1,112 @@
+trigger:
+  branches:
+    include:
+      - master
+      - develop
+      - homolog
+
+pr:
+  branches:
+    include:
+      - "*"
+
+pool:
+  vmImage: "ubuntu-latest"
+
+parameters:
+  - name: lambdaName
+    type: string
+    default: "<AWS LAMBDA NAME>"
+    
+stages:
+  - stage: Setup
+    jobs:
+      - job: Initialize
+        steps:
+          - checkout: self
+            displayName: Checkout
+            fetchDepth: '0'
+
+          - script: |
+              if [ "$(Build.SourceBranchName)" == "master" ]; then
+                echo "##vso[task.setvariable variable=envVar;isOutput=true]prod"
+              elif [ "$(Build.SourceBranchName)" == "homolog" ]; then
+                echo "##vso[task.setvariable variable=envVar;isOutput=true]qa"
+              elif [ "$(Build.SourceBranchName)" == "develop" ]; then
+                echo "##vso[task.setvariable variable=envVar;isOutput=true]dev"
+              else
+                echo "##vso[task.setvariable variable=envVar;isOutput=true]unknown"
+              fi
+            displayName: "Setting environment"
+            name: BranchName
+
+          - task: gitversion/setup@1.1.1
+            displayName: Install GitVersion
+            inputs:
+              versionSpec: '5.x'
+
+          - task: gitversion/execute@1.1.1
+            displayName: Determine version
+            name: SetVersion
+
+          - script: |
+              echo "##vso[task.setvariable variable=newVersion;isOutput=true]$(SetVersion.MajorMinorPatch)"
+            name: Version
+            displayName: "Setting version"
+
+  - stage: Build
+    dependsOn: Setup
+    jobs:
+      - job: Build
+        variables:
+          envVar: $[ stageDependencies.Setup.Initialize.outputs['BranchName.envVar'] ]
+          version: $[ stageDependencies.Setup.Initialize.outputs['Version.newVersion'] ]
+        steps:
+          - script: |
+              echo "envVar: $(envVar)"
+            displayName: "Show environment"
+
+          - script: |
+              zip -r $(envVar)-${{ parameters.lambdaName }}-$(version).zip <FILES AND FOLDERS TO BE PACKAGED>
+              cp $(envVar)-${{ parameters.lambdaName }}-$(version).zip $(Build.ArtifactStagingDirectory)/$(envVar)-${{ parameters.lambdaName }}-$(version).zip
+            displayName: "Package Lambda"
+
+          - task: PublishBuildArtifacts@1
+            displayName: "Publish Lambda Artifact"
+            inputs:
+              PathtoPublish: "$(Build.ArtifactStagingDirectory)"
+              ArtifactName: "$(envVar)-${{ parameters.lambdaName }}-$(version)"
+              publishLocation: "Container"
+
+  - stage: Deploy
+    condition: and(succeeded(), in(variables['Build.SourceBranchName'], 'develop', 'homolog', 'master'))
+    dependsOn:
+      - Setup
+      - Build
+    jobs:
+      - job: Deploy
+        variables:
+          envVar: $[ stageDependencies.Setup.Initialize.outputs['BranchName.envVar'] ]
+          version: $[ stageDependencies.Setup.Initialize.outputs['Version.newVersion'] ]
+        steps:
+          - script: |
+              echo "envVar: $(envVar)"
+            displayName: "Show environment"
+
+          - task: DownloadBuildArtifacts@1
+            displayName: "Download Lambda Artifact"
+            inputs:
+              buildType: "current"
+              artifactName: "$(envVar)-${{ parameters.lambdaName }}-$(version)"
+              downloadPath: "$(System.ArtifactsDirectory)"
+              downloadType: "single"
+              itemPattern: "**/*.zip"
+
+          - task: AWSCLI@1
+            condition: and(succeeded(), in(variables['Build.SourceBranchName'], 'develop', 'homolog', 'master'))
+            inputs:
+              awsCredentials: "<AWS CREDENTIALS>"
+              regionName: "<AWS REGION>"
+              awsCommand: "lambda"
+              awsSubCommand: "update-function-code"
+              awsArguments: "--function-name $(envVar)-${{ parameters.lambdaName }} --zip-file fileb://$(System.ArtifactsDirectory)/$(envVar)-${{ parameters.lambdaName }}-$(version)/$(envVar)-${{ parameters.lambdaName }}-$(version).zip"

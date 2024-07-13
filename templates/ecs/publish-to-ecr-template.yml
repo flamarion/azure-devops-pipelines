@@ -1,0 +1,54 @@
+parameters:
+  - name: application
+    type: string
+  - name: description
+    type: string
+
+stages:
+  - stage: Publish_to_ECR
+    condition: and(succeeded(), in(variables['Build.SourceBranchName'], 'develop', 'homolog', 'master'))
+    dependsOn:
+      - Setup
+      - Build
+    jobs:
+      - job: PublishImage
+        variables:
+          envVar: $[ stageDependencies.Setup.Initialize.outputs['BranchName.envVar'] ]
+          ecsCluster: $[ stageDependencies.Setup.Initialize.outputs['BranchName.ecsCluster'] ]
+          version: $[ stageDependencies.Setup.Initialize.outputs['Version.newVersion'] ]
+
+        steps:
+          - task: DownloadBuildArtifacts@1
+            displayName: "Download: ${{ parameters.description }}"
+            inputs:
+              buildType: "current"
+              artifactName: "${{ parameters.application }}"
+              downloadPath: "$(System.ArtifactsDirectory)"
+              downloadType: "single"
+              itemPattern: "**/*.tar.gz"
+
+          - script: |
+              gzip -d $(System.ArtifactsDirectory)/${{ parameters.application }}/${{ parameters.application }}-$(version).tar.gz
+              docker load -i $(System.ArtifactsDirectory)/${{ parameters.application }}/${{ parameters.application }}-$(version).tar
+            displayName: "Load: ${{ parameters.description }}"
+
+          - task: "AmazonWebServices.aws-vsts-tools.ECRPushImage.ECRPushImage@1"
+            condition: and(succeeded(), ne(variables['envVar'], 'unknow'))
+            displayName: "Push: ${{ parameters.description }} : latest"
+            inputs:
+              awsCredentials: "<AWS CREDENTIALS>"
+              regionName: "<AWS REGION>"
+              sourceImageName: "${{ parameters.application }}"
+              sourceImageTag: "$(version)"
+              repositoryName: "${{ parameters.application }}-$(envVar)"
+
+          - task: "AmazonWebServices.aws-vsts-tools.ECRPushImage.ECRPushImage@1"
+            condition: and(succeeded(), ne(variables['envVar'], 'unknow'))
+            displayName: "Push: ${{ parameters.description }}: $(version)"
+            inputs:
+              awsCredentials: "<AWS CREDENTIALS>"
+              regionName: "<AWS REGION>"
+              sourceImageName: "${{ parameters.application }}"
+              sourceImageTag: "$(version)"
+              repositoryName: "${{ parameters.application }}-$(envVar)"
+              pushTag: "$(version)"

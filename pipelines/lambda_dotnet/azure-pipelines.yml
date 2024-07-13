@@ -1,0 +1,130 @@
+trigger:
+  branches:
+    include:
+      - master
+      - develop
+      - homolog
+
+pr:
+  branches:
+    include:
+      - "*"
+      
+pool:
+  vmImage: "ubuntu-latest"
+
+parameters:
+  - name: lambdaName
+    type: string
+    default: "<AWS LAMBDA NAME>"
+  - name: csprojPath
+    type: string
+    default: "<PATH TO .CSPROJ FILE>"
+
+stages:
+  - stage: Setup
+    jobs:
+      - job: Initialize
+        steps:
+          - checkout: self
+            displayName: Checkout
+            fetchDepth: '0'
+
+          - script: |
+              if [ "$(Build.SourceBranchName)" == "master" ]; then
+                echo "##vso[task.setvariable variable=envVar;isOutput=true]prod"
+              elif [ "$(Build.SourceBranchName)" == "homolog" ]; then
+                echo "##vso[task.setvariable variable=envVar;isOutput=true]qa"
+              elif [ "$(Build.SourceBranchName)" == "develop" ]; then
+                echo "##vso[task.setvariable variable=envVar;isOutput=true]dev"
+              else
+                echo "##vso[task.setvariable variable=envVar;isOutput=true]unknown"
+              fi
+            displayName: "Setting environment"
+            name: BranchName
+
+          - task: gitversion/setup@1.1.1
+            displayName: Install GitVersion
+            inputs:
+              versionSpec: '5.x'
+
+          - task: gitversion/execute@1.1.1
+            displayName: Determine version
+            name: SetVersion
+
+          - script: |
+              echo "##vso[task.setvariable variable=newVersion;isOutput=true]$(SetVersion.MajorMinorPatch)"
+            name: Version
+            displayName: "Setting version"
+
+  - stage: Build
+    dependsOn: 
+      - Setup
+    jobs:
+      - job: Build
+        variables:
+          envVar: $[ stageDependencies.Setup.Initialize.outputs['BranchName.envVar'] ]
+          version: $[ stageDependencies.Setup.Initialize.outputs['Version.newVersion'] ]
+        steps:
+          - task: UseDotNet@2
+            displayName: 'Install .NET Core SDK'
+            inputs:
+              version: 8.x
+              useGlobalJson: true
+
+          - script: |
+              dotnet restore "${{ parameters.csprojPath }}"
+            displayName: "Restore packages"
+ 
+          - script: |
+              dotnet build "${{ parameters.csprojPath }}" -c Release -o /tmp/build_output
+            displayName: "Build Lambda"
+          
+          - script: |
+              dotnet publish "${{ parameters.csprojPath }}" -c Release -o /tmp/build_output
+            displayName: "Publish Lambda"
+
+          - script: |
+              cd /tmp/build_output
+              zip -r $(Build.ArtifactStagingDirectory)/$(envVar)-${{ parameters.lambdaName }}-$(version).zip .
+            displayName: "Package Lambda"
+
+          - task: PublishBuildArtifacts@1
+            displayName: "Publish Lambda Artifact"
+            inputs:
+              PathtoPublish: "$(Build.ArtifactStagingDirectory)"
+              ArtifactName: "$(envVar)-${{ parameters.lambdaName }}"
+              publishLocation: "Container"
+
+  - stage: Deploy
+    condition: and(succeeded(), in(variables['Build.SourceBranchName'], 'develop', 'homolog', 'master'))
+    dependsOn:
+      - Setup
+      - Build
+    jobs:
+      - job: Deploy
+        variables:
+          envVar: $[ stageDependencies.Setup.Initialize.outputs['BranchName.envVar'] ]
+          version: $[ stageDependencies.Setup.Initialize.outputs['Version.newVersion'] ]
+        steps:
+          - script: |
+              echo "envVar: $(envVar)"
+            displayName: "Show environment"
+
+          - task: DownloadBuildArtifacts@1
+            displayName: "Download Lambda Artifact"
+            inputs:
+              buildType: "current"
+              artifactName: "$(envVar)-${{ parameters.lambdaName }}"
+              downloadPath: "$(System.ArtifactsDirectory)"
+              downloadType: "single"
+              itemPattern: "**/*.zip"
+
+          - task: AWSCLI@1
+            condition: and(succeeded(), in(variables['Build.SourceBranchName'], 'develop', 'homolog', 'master'))
+            inputs:
+              awsCredentials: "ADO-PIPELINE-AWS-USER"
+              regionName: "us-east-1"
+              awsCommand: "lambda"
+              awsSubCommand: "update-function-code"
+              awsArguments: "--function-name $(envVar)-${{ parameters.lambdaName }} --zip-file fileb://$(System.ArtifactsDirectory)/$(envVar)-${{ parameters.lambdaName }}/$(envVar)-${{ parameters.lambdaName }}-$(version).zip"
